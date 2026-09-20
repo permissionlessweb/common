@@ -41,7 +41,6 @@ pub trait TryFoldAndReduce<T, E> {
     ) -> Result<T, E>;
 }
 
-#[cfg(feature = "multicore")]
 impl<T, E, I> TryFoldAndReduce<T, E> for I
 where
     T: Send + Sync,
@@ -55,20 +54,6 @@ where
     ) -> Result<T, E> {
         self.try_fold(&identity, &fold_op)
             .try_reduce(&identity, |a, b| fold_op(a, Ok(b)))
-    }
-}
-
-#[cfg(not(feature = "multicore"))]
-impl<T, E, I> TryFoldAndReduce<T, E> for I
-where
-    I: std::iter::Iterator<Item = Result<T, E>>,
-{
-    fn try_fold_and_reduce(
-        mut self,
-        identity: impl Fn() -> T + Send + Sync,
-        fold_op: impl Fn(T, Result<T, E>) -> Result<T, E> + Send + Sync,
-    ) -> Result<T, E> {
-        self.try_fold(identity(), fold_op)
     }
 }
 
