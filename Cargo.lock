@@ -3805,6 +3805,7 @@ dependencies = [
  "assert_matches",
  "backtrace",
  "blake2b_simd",
+ "corez",
  "criterion 0.3.6",
  "dashmap",
  "ff",
