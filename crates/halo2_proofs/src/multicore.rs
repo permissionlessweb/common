@@ -83,7 +83,6 @@ pub(crate) trait TheBestReduce {
     ) -> Option<Self::Item>;
 }
 
-#[cfg(feature = "multicore")]
 impl<I> TheBestReduce for I
 where
     I: maybe_rayon::iter::ParallelIterator,
@@ -96,21 +95,5 @@ where
         op: impl Fn(Self::Item, Self::Item) -> Self::Item + Send + Sync,
     ) -> Option<Self::Item> {
         Some(self.reduce(identity, op))
-    }
-}
-
-#[cfg(not(feature = "multicore"))]
-impl<I> TheBestReduce for I
-where
-    I: std::iter::Iterator,
-{
-    type Item = <Self as std::iter::Iterator>::Item;
-
-    fn the_best_reduce(
-        self,
-        _: impl Fn() -> Self::Item + Send + Sync,
-        f: impl Fn(Self::Item, Self::Item) -> Self::Item + Send + Sync,
-    ) -> Option<Self::Item> {
-        self.reduce(f)
     }
 }

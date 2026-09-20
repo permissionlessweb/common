@@ -11,12 +11,13 @@ use crate::{
     INSTANCE_WINDOW_BITS, INSTANCE_WINDOW_ENTRIES_PER_BASE, InstanceWindowTable,
     MAX_CACHED_INSTANCE_ROWS,
     multicore::{IntoParallelIterator, TryFoldAndReduce},
+    // maybe-rayon may be parallel via feature unification even when
+    // halo2_proofs `multicore` is off.
     plonk::{Error, VerifyingKey, commit_instance},
     poly::commitment::{Guard, MSM, Params},
     transcript::{Blake2bRead, EncodedChallenge},
 };
 
-#[cfg(feature = "multicore")]
 use maybe_rayon::iter::{IndexedParallelIterator, ParallelIterator};
 
 /// A proof verification strategy that returns the proof's MSM.
