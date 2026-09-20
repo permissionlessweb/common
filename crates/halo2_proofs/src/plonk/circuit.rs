@@ -1197,6 +1197,41 @@ impl<F: Field> Default for ConstraintSystem<F> {
 }
 
 impl<F: Field> ConstraintSystem<F> {
+    /// Number of fixed columns.
+    pub fn num_fixed_columns(&self) -> usize {
+        self.num_fixed_columns
+    }
+
+    /// Number of advice columns.
+    pub fn num_advice_columns(&self) -> usize {
+        self.num_advice_columns
+    }
+
+    /// Number of instance columns.
+    pub fn num_instance_columns(&self) -> usize {
+        self.num_instance_columns
+    }
+
+    /// Number of virtual selectors.
+    pub fn num_selectors(&self) -> usize {
+        self.num_selectors
+    }
+
+    /// Columns in the equality permutation argument.
+    pub fn permutation_columns(&self) -> Vec<Column<Any>> {
+        self.permutation.get_columns()
+    }
+
+    /// Number of gates.
+    pub fn gate_count(&self) -> usize {
+        self.gates.len()
+    }
+
+    /// Whether this system has lookup arguments.
+    pub fn has_lookups(&self) -> bool {
+        !self.lookups.is_empty()
+    }
+
     /// Obtain a pinned version of this constraint system; a structure with the
     /// minimal parameters needed to determine the rest of the constraint
     /// system.
