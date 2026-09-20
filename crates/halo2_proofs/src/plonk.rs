@@ -6,7 +6,6 @@
 //! [plonk]: https://eprint.iacr.org/2019/953
 
 use blake2b_simd::Params as Blake2bParams;
-#[cfg(feature = "batch")]
 use ff::WithSmallOrderMulGroup;
 use group::ff::{Field, FromUniformBytes, PrimeField};
 
@@ -31,6 +30,7 @@ pub(crate) mod permutation;
 mod vanishing;
 
 mod prover;
+mod serialization;
 mod verifier;
 
 #[cfg(feature = "unstable-verifier-fingerprint")]
@@ -642,11 +642,15 @@ impl<C: CurveAffine> VerifyingKey<C> {
     }
 
     /// Write this verifying key (version `0x01`): commitments + permutation VK.
-    /// Selector activations are not stored; they are compressed into extra
-    /// fixed columns at keygen. No CosmWasm footer.
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let count = u32::try_from(self.fixed_commitments.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fixed-commitment count exceeds u32",
+            )
+        })?;
         writer.write_all(&[0x01])?;
-        writer.write_all(&(u32::try_from(self.fixed_commitments.len()).unwrap()).to_le_bytes())?;
+        writer.write_all(&count.to_le_bytes())?;
         for commitment in &self.fixed_commitments {
             writer.write_all(commitment.to_bytes().as_ref())?;
         }
@@ -654,7 +658,7 @@ impl<C: CurveAffine> VerifyingKey<C> {
         Ok(())
     }
 
-    /// Read a verifying key using a deserialized [`ConstraintSystem`] (no `Circuit::configure`).
+    /// Read a verifying key using a deserialized [`ConstraintSystem`].
     pub fn read_with_cs<R: io::Read>(
         reader: &mut R,
         params: &Params<C>,
@@ -663,27 +667,45 @@ impl<C: CurveAffine> VerifyingKey<C> {
     where
         C::Scalar: FromUniformBytes<64>,
     {
-        let degree = cs.degree();
-        let domain = EvaluationDomain::new(degree as u32, params.k);
+        let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+        let k = params.k;
+        if k > C::Scalar::S || k >= usize::BITS || k >= u64::BITS {
+            return Err(invalid("unsupported circuit size"));
+        }
+        let n = 1usize << k;
+        if n < cs.minimum_rows() {
+            return Err(invalid("not enough rows for circuit"));
+        }
+        let degree =
+            u32::try_from(cs.degree()).map_err(|_| invalid("unsupported circuit degree"))?;
+        let extended_k = k + (u32::BITS - (degree.saturating_sub(2)).leading_zeros());
+        if degree > 1
+            && (extended_k > C::Scalar::S
+                || extended_k >= usize::BITS
+                || extended_k >= u64::BITS)
+        {
+            return Err(invalid("unsupported extended domain size"));
+        }
 
         let mut version_byte = [0u8; 1];
         reader.read_exact(&mut version_byte)?;
         if version_byte[0] != 0x01 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected verifying-key version",
-            ));
+            return Err(invalid("unexpected verifying-key version"));
         }
 
         let mut num_fixed_columns_le_bytes = [0u8; 4];
         reader.read_exact(&mut num_fixed_columns_le_bytes)?;
-        let num_fixed_columns = u32::from_le_bytes(num_fixed_columns_le_bytes);
+        let num_fixed_columns = u32::from_le_bytes(num_fixed_columns_le_bytes) as usize;
+        if num_fixed_columns != cs.num_fixed_columns() {
+            return Err(invalid("fixed-commitment count does not match constraint system"));
+        }
         let fixed_commitments: Vec<_> = (0..num_fixed_columns)
             .map(|_| C::read(reader))
             .collect::<io::Result<_>>()?;
 
         let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
 
+        let domain = EvaluationDomain::new(degree, k);
         Ok(Self::from_parts(
             domain,
             fixed_commitments,
@@ -754,6 +776,45 @@ pub struct ProvingKey<C: CurveAffine> {
     /// Bounded, prover-only compiled quotient plans prepared during keygen and
     /// replaced lazily if evaluator-shape validation rejects them.
     quotient_plans: Arc<evaluator_schedule::QuotientPlans<C::Scalar>>,
+}
+
+impl<C: CurveAffine> ProvingKey<C> {
+    /// Writes the embedded verifying key, then Lagrange-basis fixed and
+    /// permutation polynomials in column order. Derived caches are not encoded.
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.vk.write(writer)?;
+        for polynomial in &self.fixed_values {
+            serialization::write_polynomial(writer, polynomial)?;
+        }
+        self.permutation.write(writer)
+    }
+}
+
+impl<C: CurveAffine> ProvingKey<C>
+where
+    C::Scalar: FromUniformBytes<64> + WithSmallOrderMulGroup<3>,
+{
+    /// Reads a proving key written by [`Self::write`]. Rebuilds derived caches.
+    pub fn read_with_cs<R: io::Read>(
+        reader: &mut R,
+        params: &Params<C>,
+        cs: ConstraintSystem<C::Scalar>,
+    ) -> io::Result<Self> {
+        let vk = VerifyingKey::read_with_cs(reader, params, cs)?;
+        let fixed = (0..vk.cs.num_fixed_columns())
+            .map(|_| serialization::read_polynomial(reader, &vk.domain))
+            .collect::<io::Result<Vec<_>>>()?;
+        let (permutation, fft_twiddles) = permutation::ProvingKey::read(reader, &vk)?;
+        Ok(keygen::build_pk(
+            vk,
+            fixed,
+            permutation,
+            fft_twiddles,
+            Vec::new(),
+            None,
+            None,
+        ))
+    }
 }
 
 #[cfg(feature = "batch")]

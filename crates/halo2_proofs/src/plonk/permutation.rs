@@ -2,8 +2,12 @@ use super::circuit::{Any, Column};
 use crate::{
     arithmetic::CurveAffine,
     helpers::CurveRead,
-    poly::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial},
+    poly::{
+        Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, ProvingKeyTwiddles,
+    },
 };
+use super::serialization::{read_polynomial, write_polynomial};
+use ff::{Field, PrimeField};
 use std::io;
 pub(crate) mod keygen;
 pub(crate) mod prover;
@@ -139,7 +143,13 @@ impl<C: CurveAffine> VerifyingKey<C> {
     }
 
     pub(crate) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(&(u32::try_from(self.commitments.len()).unwrap()).to_le_bytes())?;
+        let count = u32::try_from(self.commitments.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "permutation commitment count exceeds u32",
+            )
+        })?;
+        writer.write_all(&count.to_le_bytes())?;
         for commitment in &self.commitments {
             writer.write_all(commitment.to_bytes().as_ref())?;
         }
@@ -178,6 +188,88 @@ pub(crate) struct ProvingKey<C: CurveAffine> {
     prepared_difference_commitments: Vec<Option<PreparedDifferenceCommitment<C>>>,
     polys: Vec<Polynomial<C::Scalar, Coeff>>,
     pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
+}
+
+impl<C: CurveAffine> ProvingKey<C> {
+    pub(super) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        for permutation in &self.permutations {
+            write_polynomial(writer, permutation)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn read<R: io::Read>(
+        reader: &mut R,
+        vk: &super::VerifyingKey<C>,
+    ) -> io::Result<(Self, ProvingKeyTwiddles<C::Scalar>)>
+    where
+        C::Scalar: ff::WithSmallOrderMulGroup<3>,
+    {
+        let domain = &vk.domain;
+        let argument = &vk.cs.permutation;
+        let n = 1usize << domain.k();
+        let permutations = argument
+            .columns
+            .iter()
+            .map(|_| read_polynomial(reader, domain))
+            .collect::<io::Result<Vec<_>>>()?;
+        let fft_twiddles = domain.proving_key_twiddles();
+
+        let mut delta = C::Scalar::ONE;
+        let mut deltaomega = Vec::with_capacity(permutations.len());
+        let mut identity_cells = IdentityCells(Vec::with_capacity(permutations.len()));
+        for permutation in &permutations {
+            let mut identity = delta;
+            let mut identities = Vec::with_capacity(n);
+            let mut cells = vec![0; IdentityCells::encoded_column_len(n)];
+            for (row, &permuted) in permutation.iter().enumerate() {
+                identities.push(identity);
+                if permuted == identity {
+                    cells[row / IDENTITY_BITS_PER_BYTE] |= 1_u8 << (row % IDENTITY_BITS_PER_BYTE);
+                }
+                identity *= domain.get_omega();
+            }
+            deltaomega.push(identities);
+            identity_cells.0.push(cells);
+            delta *= C::Scalar::DELTA;
+        }
+        let identity_columns = identity_cells.identity_columns(n);
+        let chunk_len = permutation_chunk_len(vk.cs_degree);
+        let fraction_rows = n - (vk.cs.blinding_factors() + 1);
+        let active_sets: Vec<_> = argument
+            .columns
+            .chunks(chunk_len)
+            .zip(identity_cells.chunks(chunk_len))
+            .zip(deltaomega.chunks(chunk_len))
+            .zip(permutations.chunks(chunk_len))
+            .map(|(((columns, identity_cells), identities), permutations)| {
+                ActivePermutationSet::from_columns(
+                    columns,
+                    identity_cells,
+                    identities,
+                    permutations,
+                    fraction_rows,
+                )
+            })
+            .collect();
+        #[cfg(any(feature = "multicore", feature = "orbits"))]
+        let prepared_difference_commitments = vec![None; active_sets.len()];
+        let (polys, cosets) =
+            domain.batch_lagrange_to_coeff_and_extended(&permutations, &fft_twiddles);
+        Ok((
+            Self {
+                permutations,
+                identity_columns,
+                identity_cells,
+                active_sets,
+                #[cfg(any(feature = "multicore", feature = "orbits"))]
+                prepared_difference_commitments,
+                polys,
+                cosets,
+            },
+            fft_twiddles,
+        ))
+    }
 }
 
 #[derive(Clone, Debug)]

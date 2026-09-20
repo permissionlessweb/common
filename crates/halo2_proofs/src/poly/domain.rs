@@ -84,6 +84,10 @@ pub struct EvaluationDomain<F: Field> {
 }
 
 impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
+    pub(crate) fn k(&self) -> u32 {
+        self.k
+    }
+
     /// This constructs a new evaluation domain object based on the provided
     /// values $j, k$.
     pub fn new(j: u32, k: u32) -> Self {
