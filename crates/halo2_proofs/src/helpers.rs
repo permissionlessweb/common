@@ -14,20 +14,3 @@ pub(crate) trait CurveRead: CurveAffine {
 }
 
 impl<C: CurveAffine> CurveRead for C {}
-
-/// Packs up to 8 bools into a byte (LSB first).
-pub(crate) fn pack(bits: &[bool]) -> u8 {
-    let mut value = 0u8;
-    assert!(bits.len() <= 8);
-    for (bit_index, bit) in bits.iter().enumerate() {
-        value |= (*bit as u8) << bit_index;
-    }
-    value
-}
-
-/// Unpacks the first `bits.len()` bits of `byte` (LSB first).
-pub(crate) fn unpack(byte: u8, bits: &mut [bool]) {
-    for (bit_index, bit) in bits.iter_mut().enumerate() {
-        *bit = (byte >> bit_index) & 1 == 1;
-    }
-}

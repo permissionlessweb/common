@@ -13,7 +13,7 @@ use group::ff::{Field, FromUniformBytes, PrimeField};
 #[cfg(feature = "batch")]
 use crate::PREPARED_INSTANCE_ROWS;
 use crate::arithmetic::{CurveAffine, best_multiexp};
-use crate::helpers::{pack, unpack, CurveRead};
+use crate::helpers::CurveRead;
 use crate::poly::{
     Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, PinnedEvaluationDomain,
     Polynomial, ProvingKeyTwiddles, commitment::Params,
@@ -593,8 +593,6 @@ pub struct VerifyingKey<C: CurveAffine> {
     cs_degree: usize,
     /// The representative of this `VerifyingKey` in transcripts.
     transcript_repr: C::Scalar,
-    /// Selector assignments as synthesized (not hashed into `transcript_repr`).
-    selectors: Vec<Vec<bool>>,
 }
 
 impl<C: CurveAffine> VerifyingKey<C>
@@ -606,7 +604,6 @@ where
         fixed_commitments: Vec<C>,
         permutation: permutation::VerifyingKey<C>,
         cs: ConstraintSystem<C::Scalar>,
-        selectors: Vec<Vec<bool>>,
     ) -> Self {
         // Compute cached values.
         let cs_degree = cs.degree();
@@ -619,7 +616,6 @@ where
             cs_degree,
             // Temporary, this is not pinned.
             transcript_repr: C::Scalar::ZERO,
-            selectors,
         };
 
         let mut hasher = Blake2bParams::new()
@@ -645,7 +641,9 @@ impl<C: CurveAffine> VerifyingKey<C> {
         &self.cs
     }
 
-    /// Write this verifying key (version `0x01`). No CosmWasm footer.
+    /// Write this verifying key (version `0x01`): commitments + permutation VK.
+    /// Selector activations are not stored; they are compressed into extra
+    /// fixed columns at keygen. No CosmWasm footer.
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&[0x01])?;
         writer.write_all(&(u32::try_from(self.fixed_commitments.len()).unwrap()).to_le_bytes())?;
@@ -653,12 +651,6 @@ impl<C: CurveAffine> VerifyingKey<C> {
             writer.write_all(commitment.to_bytes().as_ref())?;
         }
         self.permutation.write(writer)?;
-        writer.write_all(&(u32::try_from(self.selectors.len()).unwrap()).to_le_bytes())?;
-        for selector in &self.selectors {
-            for bits in selector.chunks(8) {
-                writer.write_all(&[pack(bits)])?;
-            }
-        }
         Ok(())
     }
 
@@ -692,34 +684,11 @@ impl<C: CurveAffine> VerifyingKey<C> {
 
         let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
 
-        let mut num_selectors_le_bytes = [0u8; 4];
-        reader.read_exact(&mut num_selectors_le_bytes)?;
-        let num_selectors = u32::from_le_bytes(num_selectors_le_bytes) as usize;
-        if cs.num_selectors != num_selectors {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "selector count mismatch",
-            ));
-        }
-
-        let selectors: Vec<Vec<bool>> = vec![vec![false; params.n as usize]; cs.num_selectors]
-            .into_iter()
-            .map(|mut selector| {
-                let mut selector_bytes = vec![0u8; selector.len().div_ceil(8)];
-                reader.read_exact(&mut selector_bytes)?;
-                for (bits, byte) in selector.chunks_mut(8).zip(selector_bytes) {
-                    unpack(byte, bits);
-                }
-                Ok(selector)
-            })
-            .collect::<io::Result<_>>()?;
-
         Ok(Self::from_parts(
             domain,
             fixed_commitments,
             permutation,
             cs,
-            selectors,
         ))
     }
 
