@@ -17,7 +17,7 @@ use crate::{
 };
 
 #[cfg(feature = "multicore")]
-use crate::multicore::{IndexedParallelIterator, ParallelIterator};
+use maybe_rayon::iter::{IndexedParallelIterator, ParallelIterator};
 
 /// A proof verification strategy that returns the proof's MSM.
 ///
