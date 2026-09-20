@@ -1,5 +1,7 @@
-use super::circuit::Expression;
-use ff::Field;
+use super::circuit::{Advice, Column, Expression, Fixed, Instance};
+use crate::poly::Rotation;
+use ff::{Field, PrimeField};
+use std::io;
 
 pub(crate) mod prover;
 pub(crate) mod verifier;
@@ -20,6 +22,60 @@ impl<F: Field> Argument<F> {
             input_expressions,
             table_expressions,
         }
+    }
+
+    pub(crate) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()>
+    where
+        F: PrimeField,
+    {
+        writer.write_all(&(self.input_expressions.len() as u16).to_le_bytes())?;
+        for expr in &self.input_expressions {
+            expr.write(writer)?;
+        }
+        writer.write_all(&(self.table_expressions.len() as u16).to_le_bytes())?;
+        for expr in &self.table_expressions {
+            expr.write(writer)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read<R: io::Read>(
+        reader: &mut R,
+        fixed_queries: &[(Column<Fixed>, Rotation)],
+        advice_queries: &[(Column<Advice>, Rotation)],
+        instance_queries: &[(Column<Instance>, Rotation)],
+    ) -> io::Result<Self>
+    where
+        F: PrimeField,
+    {
+        let mut num_inputs_bytes = [0u8; 2];
+        reader.read_exact(&mut num_inputs_bytes)?;
+        let num_inputs = u16::from_le_bytes(num_inputs_bytes) as usize;
+        let mut input_expressions = Vec::with_capacity(num_inputs);
+        for _ in 0..num_inputs {
+            input_expressions.push(Expression::read(
+                reader,
+                fixed_queries,
+                advice_queries,
+                instance_queries,
+            )?);
+        }
+        let mut num_tables_bytes = [0u8; 2];
+        reader.read_exact(&mut num_tables_bytes)?;
+        let num_tables = u16::from_le_bytes(num_tables_bytes) as usize;
+        let mut table_expressions = Vec::with_capacity(num_tables);
+        for _ in 0..num_tables {
+            table_expressions.push(Expression::read(
+                reader,
+                fixed_queries,
+                advice_queries,
+                instance_queries,
+            )?);
+        }
+        Ok(Argument {
+            input_expressions,
+            table_expressions,
+        })
     }
 
     pub(crate) fn required_degree(&self) -> usize {

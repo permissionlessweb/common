@@ -13,6 +13,7 @@ use group::ff::{Field, FromUniformBytes, PrimeField};
 #[cfg(feature = "batch")]
 use crate::PREPARED_INSTANCE_ROWS;
 use crate::arithmetic::{CurveAffine, best_multiexp};
+use crate::helpers::{pack, unpack, CurveRead};
 use crate::poly::{
     Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff, PinnedEvaluationDomain,
     Polynomial, ProvingKeyTwiddles, commitment::Params,
@@ -592,6 +593,8 @@ pub struct VerifyingKey<C: CurveAffine> {
     cs_degree: usize,
     /// The representative of this `VerifyingKey` in transcripts.
     transcript_repr: C::Scalar,
+    /// Selector assignments as synthesized (not hashed into `transcript_repr`).
+    selectors: Vec<Vec<bool>>,
 }
 
 impl<C: CurveAffine> VerifyingKey<C>
@@ -603,6 +606,7 @@ where
         fixed_commitments: Vec<C>,
         permutation: permutation::VerifyingKey<C>,
         cs: ConstraintSystem<C::Scalar>,
+        selectors: Vec<Vec<bool>>,
     ) -> Self {
         // Compute cached values.
         let cs_degree = cs.degree();
@@ -615,6 +619,7 @@ where
             cs_degree,
             // Temporary, this is not pinned.
             transcript_repr: C::Scalar::ZERO,
+            selectors,
         };
 
         let mut hasher = Blake2bParams::new()
@@ -635,6 +640,89 @@ where
 }
 
 impl<C: CurveAffine> VerifyingKey<C> {
+    /// Constraint system used to build this key.
+    pub fn cs(&self) -> &ConstraintSystem<C::Scalar> {
+        &self.cs
+    }
+
+    /// Write this verifying key (version `0x01`). No CosmWasm footer.
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        writer.write_all(&[0x01])?;
+        writer.write_all(&(u32::try_from(self.fixed_commitments.len()).unwrap()).to_le_bytes())?;
+        for commitment in &self.fixed_commitments {
+            writer.write_all(commitment.to_bytes().as_ref())?;
+        }
+        self.permutation.write(writer)?;
+        writer.write_all(&(u32::try_from(self.selectors.len()).unwrap()).to_le_bytes())?;
+        for selector in &self.selectors {
+            for bits in selector.chunks(8) {
+                writer.write_all(&[pack(bits)])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a verifying key using a deserialized [`ConstraintSystem`] (no `Circuit::configure`).
+    pub fn read_with_cs<R: io::Read>(
+        reader: &mut R,
+        params: &Params<C>,
+        cs: ConstraintSystem<C::Scalar>,
+    ) -> io::Result<Self>
+    where
+        C::Scalar: FromUniformBytes<64>,
+    {
+        let degree = cs.degree();
+        let domain = EvaluationDomain::new(degree as u32, params.k);
+
+        let mut version_byte = [0u8; 1];
+        reader.read_exact(&mut version_byte)?;
+        if version_byte[0] != 0x01 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected verifying-key version",
+            ));
+        }
+
+        let mut num_fixed_columns_le_bytes = [0u8; 4];
+        reader.read_exact(&mut num_fixed_columns_le_bytes)?;
+        let num_fixed_columns = u32::from_le_bytes(num_fixed_columns_le_bytes);
+        let fixed_commitments: Vec<_> = (0..num_fixed_columns)
+            .map(|_| C::read(reader))
+            .collect::<io::Result<_>>()?;
+
+        let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
+
+        let mut num_selectors_le_bytes = [0u8; 4];
+        reader.read_exact(&mut num_selectors_le_bytes)?;
+        let num_selectors = u32::from_le_bytes(num_selectors_le_bytes) as usize;
+        if cs.num_selectors != num_selectors {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "selector count mismatch",
+            ));
+        }
+
+        let selectors: Vec<Vec<bool>> = vec![vec![false; params.n as usize]; cs.num_selectors]
+            .into_iter()
+            .map(|mut selector| {
+                let mut selector_bytes = vec![0u8; selector.len().div_ceil(8)];
+                reader.read_exact(&mut selector_bytes)?;
+                for (bits, byte) in selector.chunks_mut(8).zip(selector_bytes) {
+                    unpack(byte, bits);
+                }
+                Ok(selector)
+            })
+            .collect::<io::Result<_>>()?;
+
+        Ok(Self::from_parts(
+            domain,
+            fixed_commitments,
+            permutation,
+            cs,
+            selectors,
+        ))
+    }
+
     /// Hashes a verification key into a transcript.
     pub fn hash_into<E: EncodedChallenge<C>, T: Transcript<C, E>>(
         &self,

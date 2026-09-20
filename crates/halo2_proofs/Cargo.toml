@@ -22,6 +22,7 @@ bench = false
 [dependencies]
 backtrace = { version = "0.3", optional = true }
 blake2b_simd = "1"
+corez = { version = "0.1.1", default-features = false, features = ["std"] }
 ff = "0.14"
 group = "0.14"
 halo2_legacy_pdqsort = { workspace = true, optional = true }
